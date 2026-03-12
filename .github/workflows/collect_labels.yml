@@ -1,0 +1,51 @@
+# collect_labels.yml
+#
+# NOTE: Architecture overview
+# ===========================
+# This workflow lives in the MAIN llm-guard-kit repository.
+# Label data is appended to a SEPARATE private repository: amajumder/llm-guard-labels
+#
+# Setup required:
+#   1. Create a private repo at github.com/amajumder/llm-guard-labels
+#   2. Add an empty labels.jsonl file to that repo (git commit is required)
+#   3. Generate a fine-grained PAT with contents:write on llm-guard-labels
+#   4. Add the PAT as a secret named LABELS_REPO_TOKEN in THIS repo's settings
+#   5. Customers pass that token as telemetry_token= to AgentGuard(contribute_labels=True)
+#
+# Each dispatch event appends one JSON line:
+#   {"f": [0.12, 0.33, ...], "y": 1, "d": "a3f9bc", "v": "0.17.0"}
+#
+# The workflow below checks out the labels repo (not this repo) and appends
+# to labels.jsonl there, keeping all label data isolated from source code.
+
+name: Collect Label Submissions
+
+on:
+  repository_dispatch:
+    types: [label_submission]
+
+jobs:
+  append-label:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the dedicated labels repository, not this repo
+          repository: amajumder/llm-guard-labels
+          token: ${{ secrets.LABELS_REPO_TOKEN }}
+
+      - name: Append label to dataset
+        run: |
+          PAYLOAD='${{ toJson(github.event.client_payload) }}'
+          echo "$PAYLOAD" >> labels.jsonl
+          echo "Appended: $PAYLOAD"
+
+      - name: Commit label
+        run: |
+          git config user.name "llm-guard-bot"
+          git config user.email "bot@llm-guard-kit.com"
+          git add labels.jsonl
+          git diff --staged --quiet || git commit -m "Add label [skip ci]"
+          git push

@@ -1,0 +1,80 @@
+version: "3.9"
+
+# ─── One-liner: docker compose up ─────────────────────────────────────────────
+#
+#   1. Copy .env.example → .env and fill in required values
+#   2. docker compose up --build
+#
+#   Backend  → http://localhost:8000
+#   Frontend → http://localhost:3000
+#
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Backend: FastAPI + SQLite ───────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - qppg_data:/data
+    environment:
+      # Core
+      QPPG_DB: "/data/qppg.db"
+      QPPG_HOST: "0.0.0.0"
+      QPPG_PORT: "8000"
+
+      # Auth (REQUIRED in production — generate with: openssl rand -hex 32)
+      JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
+
+      # Frontend URL (for Stripe redirect URLs and CORS)
+      FRONTEND_URL: "${FRONTEND_URL:-http://localhost:3000}"
+
+      # CORS — comma-separated origins, or "*" for local dev
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000}"
+
+      # Google OAuth (optional)
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+
+      # Stripe billing (optional — remove to run without billing)
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRO_PRICE_ID: "${STRIPE_PRO_PRICE_ID:-}"
+
+      # SMTP email notifications (optional)
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── Frontend: Next.js ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  qppg_data:
