@@ -5,6 +5,7 @@
 \usepackage{listings}
 \usepackage{booktabs}
 \usepackage{xcolor}
+\usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage[T1]{fontenc}
 \usepackage{microtype}
@@ -32,7 +33,8 @@
   stringstyle=\color{success},
   commentstyle=\color{gray}\itshape,
   breaklines=true,
-  breakatwhitespace=true,
+  breakatwhitespace=false,
+  columns=flexible,
   frame=single,
   framesep=4pt,
   rulecolor=\color{primary!30},
@@ -142,6 +144,7 @@ these failures before they propagate to users or downstream agents.
 
 \begin{table}[h]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{lrrr}
 \toprule
 \textbf{Signal} & \textbf{Within-Domain AUROC} & \textbf{Cross-Domain AUROC} & \textbf{Cost/Chain} \\
@@ -152,10 +155,368 @@ SC\_OLD + P(True) (Haiku)     & ---              & 0.74 & $\sim$\$0.0003 \\
 SC\_OLD + Sonnet judge        & 0.777            & 0.741 & $\sim$\$0.007 \\
 Alert precision @ FPR $\leq$ 10\% & 0.908       & ---  & --- \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \caption{Validated performance on held-out evaluation sets. Within-domain = HotpotQA
 (200 chains). Cross-domain = TriviaQA n=1000, 2WikiMultiHop n=200.}
 \end{table}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Problems Solved}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection*{Why LLM Agents Fail Silently}
+
+Multi-step LLM agents using ReAct reasoning (Think $\to$ Search $\to$ Observe $\to$ Repeat)
+are powerful but fragile. They fail in ways that are invisible to both the user and the
+calling application:
+
+\begin{table}[h]
+\centering\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{3.5cm}p{5.5cm}p{5cm}}
+\toprule
+\textbf{Failure Mode} & \textbf{What Happens} & \textbf{Without llm-guard-kit} \\
+\midrule
+\textbf{Retrieval failure} &
+  Search returns empty or irrelevant results. Agent hallucinates an answer. &
+  Answer returned with full confidence. User trusts it. \\[4pt]
+\textbf{Query looping} &
+  Agent repeats the same search query 3--5 times, making no progress. &
+  Wastes API budget. Returns wrong answer at end. \\[4pt]
+\textbf{Evidence hallucination} &
+  Agent invents observations not present in any search result. &
+  Undetectable without reading every step. \\[4pt]
+\textbf{Long-chain drift} &
+  Agent accumulates small errors across 8+ steps. &
+  Final answer looks plausible but is wrong. \\[4pt]
+\textbf{Cross-domain degradation} &
+  Model trained on knowledge-base QA fails on temporal or numerical reasoning. &
+  No signal that domain is out-of-distribution. \\[4pt]
+\textbf{Multi-agent trust gap} &
+  Agent A passes a wrong answer to Agent B, which acts on it. &
+  Error propagates silently through the pipeline. \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Common failure modes in multi-step LLM agents that \texttt{llm-guard-kit} detects.}
+\end{table}
+
+\subsection*{What llm-guard-kit Detects}
+
+\texttt{llm-guard-kit} computes a \texttt{risk\_score} $\in [0,1]$ from 12 structural
+features of the reasoning chain --- \emph{without reading the answer content}.
+Key signals:
+
+\begin{itemize}
+  \item \textbf{loop\_rate}: fraction of steps that repeat a previous query
+  \item \textbf{empty\_obs\_rate}: fraction of steps with no useful observation returned
+  \item \textbf{steps\_norm}: chain length normalised against expected domain length
+  \item \textbf{query\_diversity}: lexical diversity across all search queries
+  \item \textbf{retrieval\_consistency}: self-consistency of evidence across steps
+\end{itemize}
+
+These signals are combined in a fitted logistic-regression ensemble (SC\_OLD)
+validated at AUROC 0.817 on HotpotQA and 0.659--0.703 cross-domain.
+An optional P(True) or Sonnet judge signal adds another 0--6 AUROC points
+for domains with distinctive failure signatures.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Use Cases}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Use Case 1 --- Customer Support Bot (\$0 budget)}
+
+\textbf{Scenario:} A SaaS company runs a support chatbot backed by a ReAct
+agent that searches a knowledge base. Occasionally the agent returns confident
+wrong answers to billing or policy questions.
+
+\textbf{Problem:} No existing mechanism flags these before they reach the user.
+Support tickets and escalations are the first signal of a bad answer.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+guard = AgentGuard()   # $0, no API key needed
+
+def answer_support_question(question):
+    steps, final_answer = run_react_agent(question)
+    result = guard.score_chain(question, steps, final_answer)
+
+    if result.needs_alert:
+        # Route to human agent instead of returning answer
+        return escalate_to_human(question, result.failure_mode)
+
+    return final_answer
+\end{lstlisting}
+
+\textbf{Result:} Catches ~74\% of wrong answers at 90\% precision before
+they reach users. Zero API cost on the monitoring path.
+
+\subsection{Use Case 2 --- Research Assistant (Highest Accuracy)}
+
+\textbf{Scenario:} A research tool synthesizes multi-hop factual answers
+from scientific literature. Wrong answers in research summaries erode trust.
+
+\textbf{Problem:} Behavioral signals alone (0.817 AUROC) are not precise
+enough for high-stakes factual claims. Cross-domain accuracy must remain
+high across different scientific fields.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+guard = AgentGuard(api_key="sk-ant-...")  # Sonnet judge enabled
+
+result = guard.score_chain(question, steps, final_answer)
+
+if result.confidence_tier == "LOW":
+    # Trigger QueryRewriter + retry with 3 diverse queries
+    from llm_guard import QueryRewriter
+    rewriter = QueryRewriter(api_key="sk-ant-...")
+    variants = rewriter.rewrite(question, result)
+    # Re-run agent with variants[0], take best result
+\end{lstlisting}
+
+\textbf{Result:} AUROC 0.777 within-domain, 0.741 cross-domain.
+Alert precision 0.908 at FPR $\leq 10\%$.
+
+\subsection{Use Case 3 --- Multi-Agent Pipeline (Trust Propagation)}
+
+\textbf{Scenario:} An orchestrator routes tasks to specialised sub-agents
+(summariser, fact-checker, code-writer). Sub-agent outputs feed into the
+next stage. Errors in early stages corrupt downstream results.
+
+\textbf{Problem:} No standard way to communicate confidence between agents.
+Agent B has no way to know if Agent A's output is reliable.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard, A2ATrustObject
+
+# Agent A: score chain + create signed trust envelope
+guard   = AgentGuard()
+trust   = guard.generate_trust_object(question, steps, final_answer)
+trust.sign("fleet-shared-secret-2026")
+payload = trust.to_dict()   # pass via message bus / HTTP
+
+# Agent B: verify before acting
+received = A2ATrustObject.from_dict(payload)
+assert received.verify("fleet-shared-secret-2026"), "Tampered!"
+
+if received.confidence_tier == "LOW":
+    # Don't trust Agent A's answer; re-run or escalate
+    pass
+elif received.downstream_hint == "proceed":
+    # Safe to use Agent A's answer as context
+    run_agent_b(received.answer)
+\end{lstlisting}
+
+\textbf{Result:} Signed trust objects prevent error propagation.
+Tamper detection: 200/200 (100\%). Sign latency 0.034\,ms.
+
+\subsection{Use Case 4 --- Cost-Sensitive Deployment (Mid-Chain Abort)}
+
+\textbf{Scenario:} A code-generation agent runs expensive GPT-4 calls for
+each reasoning step. A bad chain typically shows signs of failure at step~2
+(empty search results, repeated queries).
+
+\textbf{Problem:} Completing the chain wastes 3--5 expensive LLM calls on
+chains that will produce wrong answers anyway.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+guard = AgentGuard()
+
+# In your agent loop, after completing step 2:
+def agent_loop(question):
+    steps = []
+    for step_idx in range(MAX_STEPS):
+        step = run_one_step(question, steps)
+        steps.append(step)
+
+        if step_idx == 1:   # after step 2 (0-indexed)
+            sg = guard.stream_guard(question, steps,
+                                    abort_threshold=0.65)
+            if sg.abort:
+                print(f"Early abort: risk={sg.risk_at_step:.3f}")
+                return handle_failed_chain(question)
+
+    return steps[-1]["action_args"]  # final answer
+\end{lstlisting}
+
+\textbf{Result:} Saves 3--5 LLM calls on ~42\% of wrong chains
+(AUROC 0.666 at step~2). Two-stage OR strategy: Recall 0.416, Precision 0.740.
+
+\subsection{Use Case 5 --- CI/CD Evaluation Pipeline}
+
+\textbf{Scenario:} A team ships prompt updates weekly. They need to catch
+regressions in agent reliability before each deployment.
+
+\textbf{Problem:} Manual QA is slow and misses edge cases. Running the
+full judge ensemble on 1000 eval chains costs \$7+ per run.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import MiniJudge
+import json
+
+judge = MiniJudge()   # $0, no API key, bundled pkl
+
+# In CI: evaluate all chains from staging run
+results = []
+for chain in load_eval_chains("staging_run_latest.jsonl"):
+    risk = judge.score(chain["question"], chain["steps"],
+                       chain["final_answer"])
+    results.append({"risk": risk, "expected": chain["correct"]})
+
+# Compute AUROC vs ground-truth labels
+from sklearn.metrics import roc_auc_score
+auroc = roc_auc_score(
+    [1 - r["expected"] for r in results],
+    [r["risk"] for r in results]
+)
+print(f"Staging AUROC: {auroc:.3f}")  # fail CI if < 0.70
+assert auroc >= 0.70, "Agent quality regression detected!"
+\end{lstlisting}
+
+\textbf{Result:} Full pipeline evaluation in seconds, zero API cost.
+Catches agent quality regressions before they reach production.
+
+\subsection{Use Case 6 --- Domain Calibration with QuickCalibrator}
+
+\textbf{Scenario:} A legal-tech company deploys an agent on contract review
+questions. The default alert threshold (0.70) gives too many false positives
+because legal reasoning chains are longer than average.
+
+\textbf{Problem:} High false-positive rate leads to alert fatigue.
+Need to recalibrate thresholds to the specific domain distribution.
+
+\textbf{Solution:}
+
+\begin{lstlisting}
+from llm_guard import QuickCalibrator
+
+# Collect 20+ labeled chains from your domain
+# (correct=True means the agent got it right)
+labeled_chains = [
+    {"question": q, "steps": s, "final_answer": fa, "correct": c}
+    for q, s, fa, c in domain_labeled_data
+]
+
+cal = QuickCalibrator(min_chains=20)
+cal.fit(labeled_chains, domain="legal_contract_review")
+
+# Now scores are calibrated to your domain's base rates
+risk = cal.score(question, steps, final_answer)
+if risk > 0.70:
+    flag_for_review(question, risk)
+\end{lstlisting}
+
+\textbf{Result:} Isotonic calibration reduces false positives by
+aligning thresholds to domain-specific failure rates.
+Particularly effective when domain base rate of failure differs
+from HotpotQA training distribution.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Quick Onboarding}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection*{Step 1 --- Install}
+
+\begin{lstlisting}[language=bash,style=pythonstyle]
+pip install llm-guard-kit
+\end{lstlisting}
+
+Requires Python 3.9+. No API key needed for behavioral scoring.
+
+\subsection*{Step 2 --- Score Your First Chain}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+guard = AgentGuard()   # zero cost, no API key
+
+result = guard.score_chain(
+    question     = "What is the capital of France?",
+    steps        = [
+        {"thought": "I need to search for this.",
+         "action_type": "Search",
+         "action_args": "capital of France",
+         "observation": "Paris is the capital and largest city of France."},
+        {"thought": "Found it.",
+         "action_type": "Finish",
+         "action_args": "Paris",
+         "observation": ""},
+    ],
+    final_answer = "Paris",
+)
+
+print(f"Risk: {result.risk_score:.3f}")        # e.g. 0.092
+print(f"Tier: {result.confidence_tier}")        # HIGH
+print(f"Alert: {result.needs_alert}")           # False
+print(f"Mode: {result.failure_mode}")           # None
+\end{lstlisting}
+
+\subsection*{Step 3 --- Add to Your Agent}
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+guard = AgentGuard()
+
+def your_agent_wrapper(question):
+    steps, answer = your_existing_agent(question)
+
+    result = guard.score_chain(question, steps, answer)
+
+    # Option A: log and return
+    log_to_monitoring(result.risk_score,
+                      result.confidence_tier,
+                      result.failure_mode)
+    return answer
+
+    # Option B: block high-risk answers
+    if result.needs_alert:
+        return "I'm not confident in my answer. Please verify."
+    return answer
+\end{lstlisting}
+
+\subsection*{Step 4 --- Upgrade to Full Precision (Optional)}
+
+If you have an Anthropic API key and need higher accuracy:
+
+\begin{lstlisting}
+from llm_guard import AgentGuard
+
+# With P(True) via Haiku (~$0.0003/chain, AUROC 0.74 cross-domain)
+guard  = AgentGuard(api_key="sk-ant-...")
+result = guard.score_with_ptrue(question, steps, final_answer)
+
+# With Sonnet judge (~$0.007/chain, AUROC 0.777 within-domain)
+guard  = AgentGuard(api_key="sk-ant-...", use_judge=True)
+result = guard.score_chain(question, steps, final_answer)
+\end{lstlisting}
+
+\subsection*{Step 5 --- Run the Demo Script}
+
+\begin{lstlisting}[language=bash,style=pythonstyle]
+# Clone the repo and run the end-to-end demo
+git clone https://github.com/Avighan/llm-guard-kit
+cd llm-guard-kit
+pip install -e .
+python scripts/demo_v017.py
+\end{lstlisting}
+
+The demo covers all 5 major use cases with real printed output.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{System Architecture}
@@ -164,6 +525,7 @@ Alert precision @ FPR $\leq$ 10\% & 0.908       & ---  & --- \\
 The figure below shows the layered architecture of \texttt{llm-guard-kit}.
 
 \begin{center}
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   every node/.style={font=\small},
   box/.style={draw, rounded corners=4pt, minimum width=3.2cm, minimum height=0.8cm,
@@ -234,7 +596,8 @@ The figure below shows the layered architecture of \texttt{llm-guard-kit}.
 \draw[arr] (result) -- (trust);
 \draw[arr, dashed, color=gray!50] (guard) -- (tel);
 
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \end{center}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -453,6 +816,7 @@ crew = Crew(agents=[...], tasks=[...],
 Use the flowchart below to select the right configuration for your use case.
 
 \begin{center}
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   every node/.style={font=\small},
   decision/.style={diamond, draw=primary, fill=primary!10, aspect=2.5,
@@ -502,7 +866,8 @@ Use the flowchart below to select the right configuration for your use case.
 \draw[arr] (D3) -- node[label, left]{YES} (A_cisc);
 \draw[arr] (D3) -- node[label, right]{NO} (A_std);
 
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \end{center}
 
 \vspace{1em}
@@ -510,6 +875,7 @@ Use the flowchart below to select the right configuration for your use case.
 \noindent\textbf{When to use \texttt{stream\_guard}:}
 
 \begin{center}
+\resizebox{0.75\textwidth}{!}{%
 \begin{tikzpicture}[
   every node/.style={font=\small},
   decision/.style={diamond, draw=warning, fill=warning!10, aspect=2.5,
@@ -534,7 +900,8 @@ Use the flowchart below to select the right configuration for your use case.
 \draw[-{Stealth}, thick] (D1) -- node[right, font=\tiny\itshape]{NO} (D2);
 \draw[-{Stealth}, thick] (D2) -- node[above, font=\tiny\itshape]{YES} (A2);
 \draw[-{Stealth}, thick] (D2) -- node[right, font=\tiny\itshape]{NO} (A3);
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \end{center}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -547,6 +914,7 @@ reported. Confidence intervals are computed via bootstrap (1000 resamples).
 \begin{table}[h]
 \centering
 \small
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{lllllr}
 \toprule
 \textbf{Method} & \textbf{Dataset} & \textbf{n} & \textbf{AUROC}
@@ -564,7 +932,8 @@ SC\_OLD+Sonnet (J5) & TriviaQA & 200 & 0.741 & --- & $\sim$\$0.007 \\
 Alert precision @ 0.70 & HotpotQA & 200 & --- & P=0.908 & \$0 \\
 CISC cost reduction & HotpotQA & 200 & identical & --- & $-41\%$ \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \caption{Full benchmark table. All results from held-out evaluation only.
 NQ open-domain AUROC 0.524 reflects the harder factoid domain gap; behavioral
 features are format-specific and degrade on truly unseen distributions.}
@@ -680,12 +1049,13 @@ def score_and_ship(question, steps, final_answer):
 
 \begin{table}[h]
 \centering\small
-\begin{tabularx}{\textwidth}{lllX}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llll}
 \toprule
 \textbf{Class} & \textbf{Method} & \textbf{Parameters} & \textbf{Returns} \\
 \midrule
-\texttt{MiniJudge} & \texttt{score()} & question, steps, final\_answer & float [0,1] \\
-\texttt{MiniJudge} & \texttt{score\_chain()} & question, steps, final\_answer & float [0,1] \\
+\texttt{MiniJudge} & \texttt{score()} & question, steps, final\_answer & float {[}0,1{]} \\
+\texttt{MiniJudge} & \texttt{score\_chain()} & question, steps, final\_answer & float {[}0,1{]} \\
 \texttt{MiniJudge} & \texttt{fit()} & chains, n\_splits=5 & MiniJudge \\
 \texttt{AgentGuard} & \texttt{score\_chain()} & question, steps, final\_answer & ChainTrustResult \\
 \texttt{AgentGuard} & \texttt{score\_with\_ptrue()} & question, steps, final\_answer & ChainTrustResult \\
@@ -701,7 +1071,8 @@ def score_and_ship(question, steps, final_answer):
 \texttt{QuickCalibrator} & \texttt{score()} & question, steps, final\_answer & float \\
 \texttt{probe\_ensemble\_blend()} & (module fn) & probe\_score, ptrue\_score, alpha=0.25 & float \\
 \bottomrule
-\end{tabularx}
+\end{tabular}%
+}
 \caption{All public API methods. \texttt{steps} is always a list of ReAct
 step dicts with keys: \texttt{thought}, \texttt{action\_type},
 \texttt{action\_args}, \texttt{observation}.}
@@ -711,11 +1082,12 @@ step dicts with keys: \texttt{thought}, \texttt{action\_type},
 
 \begin{table}[h]
 \centering\small
-\begin{tabularx}{\textwidth}{llX}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lp{2.2cm}p{8cm}}
 \toprule
 \textbf{Field} & \textbf{Type} & \textbf{Description} \\
 \midrule
-\texttt{risk\_score} & float [0,1] & Composite risk (higher = more likely wrong) \\
+\texttt{risk\_score} & float {[}0,1{]} & Composite risk (higher = more likely wrong) \\
 \texttt{confidence\_tier} & str & \texttt{"HIGH"} / \texttt{"MEDIUM"} / \texttt{"LOW"} \\
 \texttt{needs\_alert} & bool & True when risk\_score $\geq$ alert\_threshold (0.70) \\
 \texttt{failure\_mode} & str|None & \texttt{"retrieval\_fail"} / \texttt{"repeated\_query"} /
@@ -727,7 +1099,8 @@ step dicts with keys: \texttt{thought}, \texttt{action\_type},
 \texttt{latency\_ms} & float & Scoring latency in milliseconds \\
 \texttt{step\_count} & int & Number of Search steps in the chain \\
 \bottomrule
-\end{tabularx}
+\end{tabular}%
+}
 \caption{Fields of \texttt{ChainTrustResult} returned by \texttt{score\_chain()}.}
 \end{table}
 
@@ -741,6 +1114,7 @@ The telemetry flywheel allows users to contribute anonymised labels that
 improve the shared MiniJudge model over time.
 
 \begin{center}
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   every node/.style={font=\small},
   box/.style={rectangle, rounded corners=5pt, draw, minimum width=4.5cm,
@@ -765,7 +1139,8 @@ improve the shared MiniJudge model over time.
 \draw[arr] (C) -- node[above, font=\tiny]{upgrade} (D);
 \draw[arr] (D) -- node[left, font=\tiny]{better alerts} (A);
 
-\end{tikzpicture}
+\end{tikzpicture}%
+}
 \end{center}
 
 \subsection{Privacy Guarantee}
