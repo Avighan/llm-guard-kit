@@ -175,6 +175,7 @@ FAILURE_MODES = [
     "long_chain",
     "empty_answer",
     "factual_error",
+    "confident_wrong",
 ]
 
 DOMAIN_ROTATION = [
@@ -415,9 +416,13 @@ class HuntLoop:
         # 4. Novelty check — flag if:
         #    - guard says needs_alert, OR
         #    - risk above threshold, OR
-        #    - chain didn't finish (hit max steps = agent got stuck)
+        #    - chain didn't finish (hit max steps = agent got stuck), OR
+        #    - confident_wrong: agent finished quickly with a wrong-confident answer
+        #      (behavioral risk is low but factual failure; always worth capturing)
         chain_stuck = not chain.get("finished", True) and len(chain["steps"]) >= 5
-        is_failure = needs_alert or (risk_score > self.risk_threshold) or chain_stuck
+        confident_wrong = (failure_mode == "confident_wrong" and
+                           chain.get("finished", False) and len(chain["steps"]) <= 3)
+        is_failure = needs_alert or (risk_score > self.risk_threshold) or chain_stuck or confident_wrong
         if is_failure:
             try:
                 features = extract_features(question, chain["steps"], chain["final_answer"])
