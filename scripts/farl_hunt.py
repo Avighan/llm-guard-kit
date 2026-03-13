@@ -165,11 +165,14 @@ class HuntLoop:
     def weakest_failure_mode(self, iteration: int) -> str:
         """
         Return the failure mode with the fewest novel failures so far.
-        Rotates through all modes to ensure coverage.
-        Falls back to round-robin if taxonomy is empty.
+        Forces rotation every 3 iterations to prevent one mode dominating.
         """
         counts = {m: len(self.taxonomy[m]) for m in FAILURE_MODES}
-        # Prioritize least-covered mode
+        # Every 3rd iteration, force round-robin regardless of counts
+        # This prevents repeated_query from monopolizing all iterations
+        if iteration % 3 == 0:
+            return FAILURE_MODES[iteration // 3 % len(FAILURE_MODES)]
+        # Otherwise pick least-covered mode
         return min(FAILURE_MODES, key=lambda m: counts[m])
 
     def current_domain(self, iteration: int) -> str:
@@ -187,28 +190,48 @@ class HuntLoop:
         Ask Claude Haiku (hunter) to generate 1 adversarial question.
         Uses program_farl.md as the system prompt (the research brief).
         """
-        # Build recent failures context (last 5 novel failures across all modes)
-        recent = []
+        # Build ALL known questions context to prevent repeats
+        all_known_qs = []
         for mode_entries in self.taxonomy.values():
-            recent.extend(mode_entries[-3:])
-        recent = sorted(recent, key=lambda x: x.get("iteration", 0))[-5:]
-        recent_qs = [e["question"] for e in recent]
+            all_known_qs.extend(e["question"] for e in mode_entries)
+        # Also include recent non-novel failures from log (last 10)
+        recent_log_qs = [e["question"] for e in self.hunt_log[-10:]]
+        avoid_qs = list(dict.fromkeys(all_known_qs + recent_log_qs))  # deduplicated
 
         user_prompt = (
             f"Target failure mode: {target_mode}\n"
             f"Domain: {domain}\n"
             f"Iteration: {iteration + 1}\n"
+            f"Random seed (use to vary your output): {iteration * 7 + hash(domain) % 100}\n"
         )
-        if recent_qs:
-            user_prompt += "\nRecent questions already in taxonomy (generate something DIFFERENT):\n"
-            user_prompt += "\n".join(f"  - {q}" for q in recent_qs)
-        user_prompt += "\n\nGenerate ONE adversarial question now:"
+        if avoid_qs:
+            # Show last 8 to avoid prompt bloat
+            user_prompt += "\nQuestions already tried (DO NOT repeat or paraphrase these):\n"
+            user_prompt += "\n".join(f"  - {q}" for q in avoid_qs[-8:])
+        user_prompt += "\n\nGenerate ONE completely new adversarial question now (must be different topic/entity from all above):"
 
-        response = self.hunter_llm.call(
-            system=self.program_brief,
-            user=user_prompt,
-            max_tokens=150,
-        )
+        # Use temperature=0.9 for hunter to ensure diversity (bypass cache)
+        import anthropic as _anthropic
+        api_key = self.hunter_llm.client.api_key if hasattr(self.hunter_llm.client, 'api_key') else self.api_key
+        _client = _anthropic.Anthropic(api_key=self.api_key)
+        try:
+            resp = _client.messages.create(
+                model=HAIKU,
+                max_tokens=150,
+                temperature=0.9,
+                system=self.program_brief,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            response = resp.content[0].text
+            self.hunter_llm.total_input_tokens  += resp.usage.input_tokens
+            self.hunter_llm.total_output_tokens += resp.usage.output_tokens
+        except Exception:
+            # Fallback to cached client
+            response = self.hunter_llm.call(
+                system=self.program_brief,
+                user=user_prompt,
+                max_tokens=150,
+            )
         # Clean up response — strip quotes, extra text
         question = response.strip().strip('"').strip("'")
         # Remove any "Here's a question:" prefix the model might add
