@@ -121,7 +121,7 @@ from llm_guard.integrations.langchain import AgentGuardCallback
 from llm_guard.integrations.llamaindex import AgentGuardEventHandler
 from llm_guard.integrations.crewai import AgentGuardCrewCallback
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 __all__ = [
     # One-line SDK client (SaaS + local modes)
     "GuardClient",

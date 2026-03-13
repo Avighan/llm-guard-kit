@@ -190,31 +190,27 @@ class A2ATrustObject:
     agent_card_ref: Optional[str] = None    # URI referencing Agent A's capability card
     # v0.4 multi-hop chain-of-custody
     trust_chain: List[TrustHop] = field(default_factory=list)
+    # v0.5 replay protection — set automatically by sign()
+    issued_at: Optional[float] = None       # Unix timestamp when signed
+    ttl: int = 300                          # seconds until signature expires (default 5 min)
 
-    # ── Signing / verification (exp114 A2A v0.3) ──────────────────────────────
+    # ── Signing / verification (exp114 A2A v0.5) ─────────────────────────────
 
     _SIGN_FIELDS = (
         "answer", "risk_score", "confidence_tier", "failure_mode",
         "step_count", "judge_label", "downstream_hint", "should_rewrite",
+        "issued_at", "ttl",
     )
 
     def sign(self, secret: str) -> "A2ATrustObject":
         """
         Compute HMAC-SHA256 over canonical trust fields and store in trust_signature.
+        Sets issued_at to current time for replay protection.
 
         Returns self to allow chaining:
             trust = guard.generate_trust_object(...).sign(secret)
-
-        Parameters
-        ----------
-        secret : str
-            Shared secret known to Agent A and Agent B.
-
-        Notes
-        -----
-        Only the core trust fields are signed (not behavioral_components or
-        temporal_validity) to keep the canonical payload stable across versions.
         """
+        self.issued_at = time.time()
         payload = {k: getattr(self, k) for k in self._SIGN_FIELDS}
         canon   = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         self.trust_signature = hmac.new(
@@ -222,17 +218,29 @@ class A2ATrustObject:
         ).hexdigest()
         return self
 
-    def verify(self, secret: str) -> bool:
+    def verify(self, secret: str, check_expiry: bool = True) -> bool:
         """
         Verify the trust_signature using the shared secret.
 
-        Returns True when the signature is present and matches.
-        Returns False when trust_signature is None or tampered.
+        Returns True when signature is valid and (if check_expiry=True)
+        the object has not expired (issued_at + ttl > now).
+        Returns False when trust_signature is None, tampered, or expired.
 
-        Agent B should call verify() before trusting the confidence_tier.
+        Parameters
+        ----------
+        secret : str
+            Shared secret known to Agent A and Agent B.
+        check_expiry : bool
+            If True (default), reject objects older than ttl seconds.
+            Set False only for offline/testing scenarios.
         """
         if not self.trust_signature:
             return False
+        # Replay protection: reject expired objects
+        if check_expiry and self.issued_at is not None:
+            age = time.time() - self.issued_at
+            if age > self.ttl:
+                return False
         payload  = {k: getattr(self, k) for k in self._SIGN_FIELDS}
         canon    = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         expected = hmac.new(
@@ -382,12 +390,14 @@ class A2ATrustObject:
             "trust_signature":        self.trust_signature,
             "agent_card_ref":         self.agent_card_ref,
             "trust_chain":            [h.to_dict() for h in self.trust_chain],
+            "issued_at":              self.issued_at,
+            "ttl":                    self.ttl,
         }
         return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "A2ATrustObject":
-        """Deserialise from a plain dict (wire format). Backward-compatible with v0.1/v0.2."""
+        """Deserialise from a plain dict (wire format). Backward-compatible with v0.1–v0.4."""
         tv = d.get("temporal_validity")
         return cls(
             answer=d.get("answer", ""),
@@ -403,6 +413,8 @@ class A2ATrustObject:
             trust_signature=d.get("trust_signature"),
             agent_card_ref=d.get("agent_card_ref"),
             trust_chain=[TrustHop.from_dict(h) for h in d.get("trust_chain", [])],
+            issued_at=d.get("issued_at"),
+            ttl=int(d.get("ttl", 300)),
         )
 
     def __repr__(self) -> str:
