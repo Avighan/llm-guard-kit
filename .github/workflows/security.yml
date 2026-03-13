@@ -1,0 +1,54 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1"   # Every Monday 09:00 UTC
+
+jobs:
+  pip-audit:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit llm-guard-kit direct dependencies
+        run: |
+          pip-audit --desc \
+            -r <(python - <<'EOF'
+          import tomllib, sys
+          with open("pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          deps = data.get("project", {}).get("dependencies", [])
+          for d in deps:
+              print(d)
+          EOF
+          )
+
+  a2a-security-tests:
+    name: A2A Security Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" pytest numpy scikit-learn
+
+      - name: Run A2A security tests
+        run: pytest tests/test_a2a_security.py -v --tb=short
