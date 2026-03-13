@@ -1,0 +1,70 @@
+{
+  "experiment_1_baselines": {
+    "HotpotQA": {
+      "n": 200,
+      "n_wrong": 126,
+      "auroc_random": 0.533,
+      "auroc_stepcount": 0.62,
+      "auroc_sc_old": 0.557,
+      "auroc_minijudge": 0.752
+    },
+    "TriviaQA": {
+      "n": 1000,
+      "n_wrong": 174,
+      "auroc_random": 0.5003,
+      "auroc_stepcount": 0.7203,
+      "auroc_sc_old": 0.709,
+      "auroc_minijudge": 0.6096
+    },
+    "2WikiMultiHop": {
+      "n": 200,
+      "n_wrong": 108,
+      "auroc_random": 0.515,
+      "auroc_stepcount": 0.5513,
+      "auroc_sc_old": 0.5827,
+      "auroc_minijudge": 0.391
+    },
+    "MuSiQue": {
+      "n": 200,
+      "n_wrong": 145,
+      "auroc_random": 0.5157,
+      "auroc_stepcount": 0.6245,
+      "auroc_sc_old": 0.7032,
+      "auroc_minijudge": 0.6092
+    },
+    "NQ": {
+      "n": 200,
+      "n_wrong": 116,
+      "auroc_random": 0.5591,
+      "auroc_stepcount": 0.5472,
+      "auroc_sc_old": 0.6032,
+      "auroc_minijudge": 0.4787
+    }
+  },
+  "experiment_2_bootstrap_ci": {
+    "TriviaQA": {
+      "sc_auroc": "0.709 [0.660, 0.756]",
+      "mini_auroc": "0.609 [0.563, 0.657]",
+      "sc_prec_at_fpr10": "0.614 [0.300, 0.909]",
+      "mini_prec_at_fpr10": "0.900 [0.692, 1.000]"
+    },
+    "HotpotQA": {
+      "sc_auroc": "0.557 [0.475, 0.634]",
+      "mini_auroc": "0.752 [0.686, 0.817]",
+      "sc_prec_at_fpr10": "0.568 [0.000, 1.000]",
+      "mini_prec_at_fpr10": "1.000 [1.000, 1.000]"
+    },
+    "2WikiMultiHop": {
+      "sc_auroc": "0.581 [0.502, 0.657]",
+      "mini_auroc": "0.390 [0.315, 0.468]",
+      "sc_prec_at_fpr10": "0.792 [0.000, 1.000]",
+      "mini_prec_at_fpr10": "0.980 [0.500, 1.000]"
+    }
+  },
+  "notes": {
+    "chain_source": "large_dataset/hotpot_qa_chains.json (n=200) + exp156 cross-domain chains",
+    "warning": "HotpotQA chains are from a different agent run than original exp77/exp88 (0.817 AUROC). These chains are shorter (mostly 2-step), explaining lower SC_OLD AUROC of 0.557 on this set.",
+    "primary_eval": "TriviaQA n=1000 is the most statistically robust set for baseline comparison",
+    "n_bootstrap": 2000
+  }
+}
