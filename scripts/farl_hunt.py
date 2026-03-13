@@ -57,6 +57,93 @@ sys.path.insert(0, str(QPPG_ROOT))
 
 HAIKU = "claude-haiku-4-5-20251001"
 
+# ── Real search backends ──────────────────────────────────────────────────────
+
+def _search_duckduckgo(query: str, max_results: int = 3) -> str:
+    """Free search via DuckDuckGo. Requires: pip install ddgs"""
+    try:
+        try:
+            from ddgs import DDGS          # new package name (v9+)
+        except ImportError:
+            from duckduckgo_search import DDGS  # legacy fallback
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "No relevant results found."
+        return " | ".join(
+            f"{r.get('title','')}: {r.get('body','')}" for r in results
+        )[:600]
+    except ImportError:
+        raise ImportError("Run: pip install ddgs")
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+def _search_tavily(query: str, tavily_api_key: str, max_results: int = 3) -> str:
+    """AI-optimised search via Tavily. Requires: pip install tavily-python"""
+    try:
+        from tavily import TavilyClient
+        resp = TavilyClient(api_key=tavily_api_key).search(
+            query, max_results=max_results, search_depth="basic"
+        )
+        results = resp.get("results", [])
+        if not results:
+            return "No relevant results found."
+        return " | ".join(
+            f"{r.get('title','')}: {r.get('content','')}" for r in results
+        )[:600]
+    except ImportError:
+        raise ImportError("Run: pip install tavily-python")
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+def run_react_agent_real_search(question: str, llm, search_fn, max_steps: int = 7) -> dict:
+    """
+    ReAct agent with a REAL search backend (DuckDuckGo or Tavily).
+
+    Produces genuine retrieval_fail, factual_error, and empty_answer failures
+    instead of the repeated_query failures that dominate the fake-search setup.
+    Detects repeated queries and short-circuits them before wasting a search call.
+    """
+    from experiments.exp156_live_crossdomain_generation import (
+        REACT_SYSTEM, parse_react_output,
+    )
+    steps, seen_queries = [], set()
+    conversation = f"Question: {question}"
+
+    for _ in range(max_steps):
+        output = llm.call(REACT_SYSTEM,
+                          conversation + "\n\n(Now output your next Thought and Action.)",
+                          max_tokens=300)
+        thought, action_type, action_arg = parse_react_output(output)
+
+        if action_type == "Finish":
+            steps.append({"thought": thought, "action_type": "Finish",
+                          "action_arg": action_arg, "observation": ""})
+            return {"final_answer": action_arg, "steps": steps, "finished": True}
+
+        query_key = action_arg.strip().lower()
+        if query_key in seen_queries:
+            observation = "You already searched for this. Try a different, more specific query."
+        else:
+            seen_queries.add(query_key)
+            observation = search_fn(action_arg)
+
+        steps.append({"thought": thought, "action_type": "Search",
+                      "action_arg": action_arg, "observation": observation})
+        conversation += (f"\nThought: {thought}\nAction: Search[{action_arg}]"
+                         f"\nObservation: {observation}")
+
+    forced = llm.call(
+        "Given the conversation so far, what is the best final answer? Reply with ONLY the answer.",
+        conversation, max_tokens=100,
+    )
+    steps.append({"thought": "Forced finish", "action_type": "Finish",
+                  "action_arg": forced, "observation": ""})
+    return {"final_answer": forced, "steps": steps, "finished": False}
+
+
 # ── Import reusable components from exp156 ────────────────────────────────────
 
 try:
@@ -110,6 +197,8 @@ class HuntLoop:
         novelty_threshold: float = 0.3,
         budget_usd: float = 2.0,
         resume: bool = False,
+        search_backend: str = "fake",   # "fake" | "duckduckgo" | "tavily"
+        tavily_api_key: str = "",
     ):
         self.api_key           = api_key
         self.n_iterations      = n_iterations
@@ -120,6 +209,32 @@ class HuntLoop:
         # Separate LLM clients for hunter and victim (separate caches)
         self.hunter_llm = CachedLLMClient(api_key, model=HAIKU, domain_tag="farl_hunter")
         self.victim_llm = CachedLLMClient(api_key, model=HAIKU, domain_tag="farl_victim")
+
+        # ── Search backend ────────────────────────────────────────────────────
+        self.search_backend = search_backend
+        if search_backend == "duckduckgo":
+            try:
+                try:
+                    from ddgs import DDGS  # noqa — verify installed (new package name)
+                except ImportError:
+                    from duckduckgo_search import DDGS  # noqa — legacy fallback
+                self.search_fn = _search_duckduckgo
+                print(f"[search] Using DuckDuckGo (real search, free)")
+            except ImportError:
+                print("WARNING: ddgs not installed. Run: pip install ddgs")
+                print("         Falling back to fake search engine.")
+                self.search_fn = None
+        elif search_backend == "tavily":
+            if not tavily_api_key:
+                tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+            if not tavily_api_key:
+                print("WARNING: No TAVILY_API_KEY found. Falling back to fake search engine.")
+                self.search_fn = None
+            else:
+                self.search_fn = lambda q: _search_tavily(q, tavily_api_key)
+                print(f"[search] Using Tavily (real search, AI-optimised)")
+        else:
+            self.search_fn = None  # None = use fake Haiku search
 
         # llm-guard-kit judge (behavioral only, $0)
         self.guard = AgentGuard()
@@ -252,8 +367,13 @@ class HuntLoop:
         # 1. Hunter generates question
         question = self.generate_adversarial_question(target_mode, domain, iteration)
 
-        # 2. Victim runs ReAct chain
-        chain = run_react_agent(question, self.victim_llm, max_steps=6)
+        # 2. Victim runs ReAct chain (real or fake search)
+        if self.search_fn is not None:
+            chain = run_react_agent_real_search(
+                question, self.victim_llm, self.search_fn, max_steps=7
+            )
+        else:
+            chain = run_react_agent(question, self.victim_llm, max_steps=6)
 
         # 3. Judge scores chain (llm-guard-kit, $0 behavioral)
         try:
@@ -544,6 +664,11 @@ def main():
     parser.add_argument("--demo",       action="store_true",      help="Run self-evaluation demo mode")
     parser.add_argument("--question",   type=str,   default="Who was the first person to walk on the moon, and what was the name of the mission?",
                         help="Question for --demo mode")
+    parser.add_argument("--search",     type=str,   default="fake",
+                        choices=["fake", "duckduckgo", "tavily"],
+                        help="Search backend: fake (default, free), duckduckgo (free, real), tavily (best, needs key)")
+    parser.add_argument("--tavily-key", type=str,   default="",
+                        help="Tavily API key (or set TAVILY_API_KEY env var). Get free key at tavily.com")
     args = parser.parse_args()
 
     api_key = _load_api_key()
@@ -563,6 +688,8 @@ def main():
         novelty_threshold=args.novelty,
         budget_usd=args.budget,
         resume=args.resume,
+        search_backend=args.search,
+        tavily_api_key=args.tavily_key,
     )
     loop.run()
 
