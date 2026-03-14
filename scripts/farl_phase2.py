@@ -50,7 +50,7 @@ from experiments.exp156_live_crossdomain_generation import (
     CachedLLMClient, run_react_agent, _load_api_key,
 )
 from llm_guard import AgentGuard
-from llm_guard.local_verifier import extract_features
+from llm_guard.mini_judge import _extract_features as _mj_extract_features
 
 
 # ── Victim system prompts ─────────────────────────────────────────────────────
@@ -151,6 +151,7 @@ class VictimPool:
                 "victim_name":   name,
                 "final_answer":  chain["final_answer"],
                 "steps":         len(chain["steps"]),
+                "step_details":  chain["steps"],   # actual steps for feature extraction
                 "finished":      chain.get("finished", False),
                 "risk_score":    round(risk, 4),
                 "failure_mode":  failure_mode,
@@ -326,6 +327,7 @@ class FARLCycleRunner:
         budget_usd: float = 5.0,
         search_backend: str = "duckduckgo",
         resume: bool = False,
+        risk_threshold: float = 0.40,
     ):
         self.api_key = api_key
         self.n_cycles = n_cycles
@@ -340,7 +342,7 @@ class FARLCycleRunner:
             search_fn = _search_duckduckgo
             print("[search] DuckDuckGo")
 
-        self.victim_pool = VictimPool(api_key, search_fn=search_fn)
+        self.victim_pool = VictimPool(api_key, search_fn=search_fn, risk_threshold=risk_threshold)
         self.hunter_llm = CachedLLMClient(api_key, model=HAIKU, domain_tag="farl_p2_hunter")
         self.reward_tracker = HunterRewardTracker(FAILURE_MODES, DOMAIN_ROTATION)
 
@@ -460,16 +462,25 @@ class FARLCycleRunner:
         any_failure = diversity > 0
         if any_failure:
             try:
-                recent_qs = {e["question"] for e in self.phase2_log[-50:]}
-                novelty = 0.0 if question in recent_qs else (1.0 if not self.known_features else 0.5)
+                # Real novelty: extract MiniJudge features from worst victim's chain
+                worst_steps = worst.get("step_details", [])
+                feats = _mj_extract_features({
+                    "question":     question,
+                    "steps":        worst_steps,
+                    "final_answer": worst.get("final_answer", ""),
+                })
+                novelty = self.compute_novelty(np.array(feats))
                 entry["novelty_score"] = round(novelty, 3)
 
                 if novelty > 0.3:
                     entry["novel"] = True
+                    self.known_features.append(np.array(feats))
                     mode_key = failure_mode or "unknown"
                     self.taxonomy[mode_key].append({
                         **{k: v for k, v in entry.items() if k != "victim_results"},
                         "victim_diversity_score": diversity,
+                        "step_details":           worst_steps,             # for feature extraction in ablation
+                        "final_answer":           worst.get("final_answer", ""),  # required by retrain loader
                     })
             except Exception:
                 pass
@@ -539,10 +550,11 @@ class FARLCycleRunner:
     # ── MiniJudge retrain ─────────────────────────────────────────────────────
 
     def _retrain_mini_judge(self, cycle_idx: int) -> float:
-        """Retrain MiniJudge on accumulated taxonomy. Returns test AUROC."""
-        import subprocess, re as _re
+        """Retrain MiniJudge on accumulated taxonomy. Returns test AUROC after retraining."""
+        import subprocess
         n_chains = sum(len(v) for v in self.taxonomy.values())
         print(f"\n  [Cycle {cycle_idx+1}] Retraining MiniJudge on {n_chains} taxonomy chains...")
+        report_path = QPPG_ROOT / "results" / "farl_hunt" / "retrain_report.json"
         try:
             tax_path = QPPG_ROOT / "results" / "farl_hunt" / "taxonomy.json"
             tax_path.parent.mkdir(parents=True, exist_ok=True)
@@ -553,8 +565,15 @@ class FARLCycleRunner:
                 ["python3", str(QPPG_ROOT / "scripts" / "retrain_mini_judge_from_taxonomy.py")],
                 capture_output=True, text=True, cwd=str(QPPG_ROOT)
             )
-            m = _re.search(r"Test AUROC[:\s]+([0-9.]+)", result.stdout)
-            return float(m.group(1)) if m else 0.0
+            if result.returncode != 0:
+                print(f"  WARNING: retrain script exited {result.returncode}")
+                print(result.stderr[-800:] if result.stderr else "")
+                return 0.0
+            # Read AUROC after retraining from JSON report (not stdout — avoids capturing "before" value)
+            if report_path.exists():
+                report = json.loads(report_path.read_text())
+                return float(report.get("auroc_after_test", 0.0))
+            return 0.0
         except Exception as e:
             print(f"  WARNING: retrain failed: {e}")
             return 0.0
@@ -645,7 +664,8 @@ if __name__ == "__main__":
     parser.add_argument("--n",       type=int,   default=100,          help="Hunt iterations per cycle")
     parser.add_argument("--budget",  type=float, default=5.0,          help="Total budget in USD")
     parser.add_argument("--search",  type=str,   default="duckduckgo", choices=["fake", "duckduckgo", "tavily"])
-    parser.add_argument("--resume",  action="store_true",              help="Resume from checkpoint")
+    parser.add_argument("--resume",    action="store_true",              help="Resume from checkpoint")
+    parser.add_argument("--threshold", type=float, default=0.40,         help="Risk threshold for victim failure (default: 0.40)")
     args = parser.parse_args()
 
     api_key = _load_api_key()
@@ -656,5 +676,6 @@ if __name__ == "__main__":
         budget_usd=args.budget,
         search_backend=args.search,
         resume=args.resume,
+        risk_threshold=args.threshold,
     )
     runner.run()

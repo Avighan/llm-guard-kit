@@ -203,16 +203,24 @@ def test_reward_tracker_summary_top5():
 # ── FARLCycleRunner ───────────────────────────────────────────────────────────
 
 def test_cycle_runner_init():
-    """FARLCycleRunner initialises without API call."""
-    with patch("scripts.farl_phase2._load_api_key", return_value="test-key"), \
+    """FARLCycleRunner.__init__ sets attributes correctly without making API calls."""
+    with patch("scripts.farl_phase2.CachedLLMClient") as mock_llm, \
          patch("scripts.farl_phase2.AgentGuard"), \
-         patch("scripts.farl_phase2.CachedLLMClient"):
-        runner = FARLCycleRunner.__new__(FARLCycleRunner)
-        runner.n_cycles = 3
-        runner.n_per_cycle = 50
-        runner.cycle_results = []
+         patch("scripts.farl_phase2.VictimPool"), \
+         patch("scripts.farl_phase2.PHASE2_DIR") as mock_dir:
+        mock_dir.mkdir = MagicMock()
+        runner = FARLCycleRunner(
+            api_key="test-key",
+            n_cycles=3,
+            n_per_cycle=50,
+            budget_usd=1.0,
+            search_backend="fake",
+        )
         assert runner.n_cycles == 3
         assert runner.n_per_cycle == 50
+        assert runner.budget_usd == 1.0
+        assert isinstance(runner.cycle_results, list)
+        assert isinstance(runner.phase2_log, list)
 
 
 def test_diversity_score_in_log_entry():

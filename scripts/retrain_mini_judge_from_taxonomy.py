@@ -91,12 +91,14 @@ def load_taxonomy_chains():
     X, y = [], []
     for mode, entries in taxonomy.items():
         for entry in entries:
-            if not entry.get("step_details"):
+            # Accept both Phase 1 ("step_details") and Phase 2 ("steps") field names
+            steps = entry.get("step_details") or entry.get("steps")
+            if not steps:
                 continue
             chain = {
-                "question":     entry["question"],
-                "steps":        entry["step_details"],
-                "final_answer": entry["final_answer"],
+                "question":     entry.get("question", ""),
+                "steps":        steps,
+                "final_answer": entry.get("final_answer", ""),  # default empty — not all Phase 2 entries have this
             }
             try:
                 feat = chain_to_features(chain)
@@ -203,9 +205,10 @@ def save_updated(pipe, cv_auroc, n_train):
         shutil.copy(PKL_PATH, orig_path)
         print(f"  Backed up original to {orig_path.name}")
 
+    import llm_guard as _llm_guard
     data = {
         "pipeline":    pipe,
-        "feature_set": "SC_OLD + FARL taxonomy hardening (v0.18.0)",
+        "feature_set": f"SC_OLD + FARL taxonomy hardening (v{_llm_guard.__version__})",
         "embed_model": "all-MiniLM-L6-v2",
         "cv_auroc":    cv_auroc,
         "n_train":     n_train,
@@ -271,8 +274,8 @@ def main():
     print(f"\n  Delta (test set): {delta:+.4f}")
     print(f"  CV AUROC (train): {cv_auroc:.4f} ± {cv_std:.4f}")
 
-    # Statistical significance: non-overlapping CIs = strong signal
-    sig = "SIGNIFICANT" if ci_lo_after > ci_lo_before else "CIs overlap — more data needed"
+    # Statistical significance: non-overlapping 95% CIs (lower bound of after > UPPER bound of before)
+    sig = "SIGNIFICANT" if ci_lo_after > ci_hi_before else "CIs overlap — more data needed"
     print(f"  Statistical signal: {sig}")
 
     # ── 8. Save ──

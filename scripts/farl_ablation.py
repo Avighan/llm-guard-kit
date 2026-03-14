@@ -96,13 +96,15 @@ def load_taxonomy():
     X, y = [], []
     for mode, entries in taxonomy.items():
         for entry in entries:
-            if not entry.get("step_details"):
+            # Accept both Phase 1 ("step_details") and Phase 2 ("steps") field names
+            steps = entry.get("step_details") or entry.get("steps")
+            if not steps:
                 continue
             try:
                 X.append(chain_to_features({
-                    "question":     entry["question"],
-                    "steps":        entry["step_details"],
-                    "final_answer": entry["final_answer"],
+                    "question":     entry.get("question", ""),
+                    "steps":        steps,
+                    "final_answer": entry.get("final_answer", ""),  # defensive: Phase 2 entries may lack this
                 }))
                 y.append(1)
             except Exception:
@@ -180,7 +182,8 @@ def main():
     )
 
     delta = auroc_farl - auroc_base
-    sig = "SIGNIFICANT" if lo_farl > lo_base else "CIs overlap — more taxonomy data needed"
+    # Non-overlapping 95% CIs: lower bound of FARL must exceed UPPER bound of baseline
+    sig = "SIGNIFICANT" if lo_farl > hi_base else "CIs overlap — more taxonomy data needed"
 
     print("\n" + "=" * 60)
     print(f"  ABLATION RESULT")
