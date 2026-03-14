@@ -1,6 +1,6 @@
 # Scope and Limitations of llm-guard-kit
 
-*Last updated: 2026-03-14. Based on validated experiments exp92, exp113, exp156.*
+*Last updated: 2026-03-14. Based on validated experiments exp92, exp113, exp142, exp156, exp_publishability, exp_ptrue_significance.*
 
 ---
 
@@ -31,10 +31,24 @@ harder compositional reasoning (MuSiQue CI crosses 0.5).
 **Takeaway:** When the system flags a chain as HIGH-RISK (FPR ≤ 10%), it is wrong
 ≥ 83% of the time (lower CI bound). High-precision alerting is validated.
 
+### P(True) Haiku judge — cross-domain (exp142 + exp_ptrue_significance)
+
+| Domain | P(True) AUROC | 95% CI | n |
+| ------ | ------------- | ------ | - |
+| HotpotQA-test | 0.759 | [0.638, 0.871] | 60 |
+| TriviaQA-v100 | 0.682 | [0.555, 0.801] | 60 |
+| 2WikiMultiHop | 0.758 | [0.639, 0.864] | 60 |
+
+P(True) + behavioral ensemble (2WikiMultiHop): **0.817 [0.706, 0.912]**
+
+**Takeaway:** P(True) (Haiku rating 1–5) is statistically significant on all 3 validated
+domains. All lower CI bounds > 0.5 with n=60. The 2WikiMultiHop ensemble reaches AUROC ≥ 0.80.
+Zero API calls required if chains are cached.
+
 ### Stream guard (mid-chain abort at step 2)
 
 | Metric | Value | n | Source |
-|--------|-------|---|--------|
+| ------ | ----- | - | ------ |
 | AUROC (Haiku-blended, 59.5% cache) | 0.666 | 200 | exp113 |
 | AUROC (cache-only estimate) | 0.682 | 200 | exp_publishability |
 | Cache-only 95% CI | [0.607, 0.755] | 200 | exp_publishability |
@@ -68,13 +82,23 @@ complex multi-hop tasks where failure modes are richer.
 
 ## Known Limitations
 
-### L1 — Sample size for P(True) / Sonnet judge
+### L1 — P(True) on exp134–137 (n=37) vs exp142 (n=60×3, validated)
 
-- **Current:** n=37 test chains for P(True) calibration experiments (exp134–137)
-- **Effect:** Confidence intervals are wide (±0.05 to ±0.10 AUROC).
-  Gains from isotonic calibration (0.871 AUROC) and optimal ptrue_weight (0.876)
-  are directionally real but not statistically distinguishable at n=37.
-- **Fix:** exp_ptrue_expanded.py targets n≥200 (~$3 API budget).
+- **exp134–137:** n=37 test chains — confidence intervals were wide (±0.05–0.10 AUROC).
+  Those gains (isotonic calibration AUROC 0.871, ptrue_weight 0.876) are directionally
+  real but cannot be claimed as statistically significant at n=37.
+- **exp142 validation (n=60 per domain, exp_ptrue_significance.py, $0):**
+
+| Domain | P(True) AUROC | 95% CI | Significant? |
+| ------ | ------------- | ------ | ------------ |
+| HotpotQA-test | 0.759 | [0.638, 0.871] | ✅ YES |
+| TriviaQA-v100 | 0.682 | [0.555, 0.801] | ✅ YES |
+| 2WikiMultiHop | 0.758 | [0.639, 0.864] | ✅ YES |
+
+P(True) + behavioral ensemble (2Wiki): **0.817 [0.706, 0.912]** — above 0.80 threshold.
+
+- **Status:** P(True) is now statistically validated across 3 domains.
+  Isotonic calibration gains remain preliminary (exp134–137 n=37).
 
 ### L2 — FARL taxonomy significance
 
