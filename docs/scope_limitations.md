@@ -98,7 +98,9 @@ complex multi-hop tasks where failure modes are richer.
 P(True) + behavioral ensemble (2Wiki): **0.817 [0.706, 0.912]** — above 0.80 threshold.
 
 - **Status:** P(True) is now statistically validated across 3 domains.
-  Isotonic calibration gains remain preliminary (exp134–137 n=37).
+  Isotonic calibration gains from exp134–137 (n=37) were noise — at n=180
+  (exp_isotonic_significance.py) the gain is +0.0015. P(True) raw scores are
+  already well-calibrated; no isotonic step is needed in production.
 
 ### L2 — FARL taxonomy significance
 
