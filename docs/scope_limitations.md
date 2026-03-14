@@ -102,11 +102,17 @@ P(True) + behavioral ensemble (2Wiki): **0.817 [0.706, 0.912]** — above 0.80 t
 
 ### L2 — FARL taxonomy significance
 
-- **Current:** 5 novel failure chains from FARL Phase 2 (300 iterations).
-  AUROC delta +0.042; CIs overlap ([0.725, 0.814] vs [0.682, 0.775]).
-- **Effect:** Taxonomy contribution is not statistically significant yet.
-- **Fix:** Need ≥50 novel chains for non-overlapping 95% CIs. Requires ~1,000+
-  additional FARL iterations (~$7 API budget).
+- **Current (final, after 1,300 iterations total):** 16 novel failure chains.
+  AUROC delta +0.0017; CIs fully overlap (Baseline [0.726, 0.812] vs FARL [0.726, 0.815]).
+- **Root cause:** Feature space saturated at 2 failure modes (repeated_query, confident_wrong).
+  Cycles 2–5 produced 0 additional novel chains. Lowering novelty threshold to 0.15 recovered
+  11 chains in cycle 1 but subsequent cycles found nothing new.
+- **Effect:** FARL taxonomy has qualitative value (3 failure modes documented) but
+  is not statistically significant. The 16 novel chains are too few and too similar
+  to move the MiniJudge AUROC beyond the SC_OLD baseline CI.
+- **Path to significance:** Requires qualitatively different failure domains (code/math agents,
+  multi-agent pipelines) — not more iterations on the same QA domain. Current FARL
+  is domain-saturated for HotpotQA-style ReAct agents.
 
 ### L3 — NQ is out of scope
 
